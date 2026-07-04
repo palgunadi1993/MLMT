@@ -163,15 +163,23 @@ def create_store(
             earthmodel_1d=cake.LayeredModel.from_scanlines(
                 cake.read_nd_model_str(earthmodel_nd)),
             tabulated_phases=[
+                # 'begin'/'end' are REQUIRED by the qseis/qssp builders:
+                # their default cut/time_region timings reference them
+                pgf.meta.TPDef(id='begin', definition='P,p,\\P,\\p'),
+                pgf.meta.TPDef(id='end', definition='2.5'),
                 pgf.meta.TPDef(id='anyP', definition='P,p,\\P,\\p'),
                 pgf.meta.TPDef(id='anyS', definition='S,s,\\S,\\s')])
         backend.init(sdir, gcfg.get('backend_variant'),
                      config_params=config_params)
 
-    backend.build(sdir, force=force, nworkers=nworkers)
+    # travel-time tables BEFORE build (the classical `fomosto ttt` step):
+    # the numerical builders window their computations with stored-phase
+    # timings; ahfullgreen does not need them but they are cheap
     store = pgf.store.Store(sdir)
     store.make_travel_time_tables(force=force)
     store.close()
+
+    backend.build(sdir, force=force, nworkers=nworkers)
     return sdir
 
 

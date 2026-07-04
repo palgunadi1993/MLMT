@@ -29,6 +29,7 @@ gf:
     # perturbed stores are auto-registered as <id>_pert<k> by script 01
   perturbed_ids: []                  # filled by scripts/01 (e.g. [sunda_banda_2hz_pert0, ...])
   backend: qseis                     # qseis | qssp | ahfullgreen
+  backend_variant: 2006b             # matches the installed fomosto_qseis2006b binary
   earthmodel: config/velocity_model.nd
   sample_rate_hz: 2.0
   distance_min_km: 0.0
