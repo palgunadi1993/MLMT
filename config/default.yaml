@@ -1,0 +1,159 @@
+# SBI-MT default configuration — Tier A (regional Sunda-Banda arc, Mw 3.8-6.5).
+# Tier B (Mw 1-3.8, local, ~0.5-4 Hz) must be reachable by editing THIS file only:
+# band, store ids, distance range, priors and MT constraint mode all live here.
+
+seed: 42
+device: auto            # auto | cpu | cuda
+tier: A
+
+paths:
+  data_raw: data/raw
+  stations_xml: data/raw/stations.xml
+  catalog: data/raw/catalog.csv
+  waveforms: data/raw/waveforms
+  noise_raw: data/raw/noise
+  grond_runs: data/raw/grond_runs
+  gf_stores: data/gf_stores          # parent dir of all fomosto stores
+  noise_library: data/noise.h5
+  validation_cache: data/validation_events.h5
+  runs: runs                         # training checkpoints + logs
+  results: results                   # per-event inference outputs
+  figures: figures
+
+gf:
+  # Named stores; select by key. Tier B adds a high-rate 0-100 km store with Q here.
+  store: reference                   # key into `stores` used by the WLS layer / inference
+  stores:
+    reference:
+      id: sunda_banda_2hz            # directory name under paths.gf_stores
+    # perturbed stores are auto-registered as <id>_pert<k> by script 01
+  perturbed_ids: []                  # filled by scripts/01 (e.g. [sunda_banda_2hz_pert0, ...])
+  backend: qseis                     # qseis | qssp | ahfullgreen
+  earthmodel: config/velocity_model.nd
+  sample_rate_hz: 2.0
+  distance_min_km: 0.0
+  distance_max_km: 1500.0
+  distance_delta_km: 2.0
+  source_depth_min_km: 1.0
+  source_depth_max_km: 120.0
+  source_depth_delta_km: 1.0
+  n_perturbed_stores: 8              # velocity-perturbed stores for training robustness
+  velocity_perturbation_percent: [1.0, 3.0]   # uniform |dvp/vp|, |dvs/vs| per layer
+  # Differentiable torch GF grid built around the catalog location of each event:
+  grid:
+    extent_horizontal_km: 15.0       # dn, de in [-extent, +extent]
+    extent_depth_km: 15.0            # dz likewise (clipped to store depth range)
+    spacing_horizontal_km: null      # null -> use store distance_delta
+    spacing_depth_km: null           # null -> use store source_depth_delta
+
+processing:
+  band_hz: [0.02, 0.10]              # stored per-event in metadata; Tier B: ~[0.5, 4.0]
+  filter_order: 4                    # zero-phase (magnitude-squared Butterworth, FFT domain)
+  window_pre_p_s: 20.0
+  window_length_s: 320.0             # P-20 s .. P+300 s
+  taper_fraction: 0.05               # cosine taper fraction of window at each end
+  components: [Z, R, T]
+  snr_min: 1.5                       # per-trace QC threshold (signal RMS / pre-event RMS)
+  response_removal:
+    water_level: 60
+    pre_filt_factor: [0.5, 0.75, 1.5, 2.0]   # x band corners -> pre-filter corners
+
+wls:
+  tikhonov: 1.0e-3                   # lambda, relative to trace(GtWG)/6
+  constraint: full                   # full | deviatoric | dc (dc = post-hoc projection)
+  distance_weighting: false          # optional r-weighting of traces
+  station_shift_max_s: 5.0           # cross-correlation alignment bound (Tier B critical)
+  station_shift_enable: true
+
+priors:
+  mw: [4.5, 6.5]
+  depth_km: [5.0, 100.0]
+  # Study polygon (lon, lat) — Sunda-Banda arc box; refine to actual polygon as needed
+  study_polygon: [[110.0, -12.5], [132.0, -12.5], [132.0, -4.0], [110.0, -4.0]]
+  dt0_s: [-10.0, 10.0]
+  station_dt_s: [-5.0, 5.0]
+  station_dt_zero_fraction: 0.5      # fraction of training samples with all station dt = 0
+  dn_km: [-15.0, 15.0]               # centroid perturbation priors (match gf.grid extent)
+  de_km: [-15.0, 15.0]
+  dz_km: [-15.0, 15.0]
+  mt_prior: uniform_tt               # uniform_tt (Tape&Tape-uniform) | dc_dominant
+  dc_dominant_fraction: 0.5          # only used when mt_prior == dc_dominant
+
+synth:
+  n_stations: [4, 30]
+  station_dropout: 0.1               # additional random availability dropout
+  velocity_perturbed_fraction: 0.5   # fraction of samples generated with perturbed stores
+  snr_range: [1.5, 20.0]             # log-uniform target SNR
+  noise: gaussian                    # library | gaussian  (library once noise.h5 exists)
+  n_validation: 5000
+
+noise_build:                         # script 02 (empirical noise library)
+  window_stride_fraction: 1.0        # window stride / window length (1.0 = no overlap)
+  event_reject_pre_s: 120.0          # reject windows overlapping [origin - pre, origin + post]
+  event_reject_post_s: 3600.0        #   for any catalog event
+  max_windows_per_station: 5000      # cap per station and channel class (Z | H)
+
+theta:
+  # nuisance parameters modeled by the flow (per-station shifts handled by XC alignment
+  # in forward.py; add 'station_dt' here only if Phase 7 metrics demand it)
+  names: [dn_km, de_km, dz_km, dt0_s]
+
+model:
+  encoder:
+    channels: [32, 64, 64, 128, 128]   # 5 residual blocks
+    kernel_sizes: [7, 5, 5, 3, 3]
+    embedding_dim: 128
+    groupnorm_groups: 8
+  metadata_dim: 9                    # [sin az, cos az, log10 dist, comp one-hot(3), log10 snr, weight, log10 norm]
+  set_transformer:
+    dim: 256
+    n_isab: 2
+    n_heads: 4
+    n_inducing: 16
+  flow:
+    type: nsf                        # neural spline flow (zuko)
+    transforms: 6
+    hidden: [128, 128]
+    bins: 8
+
+train:
+  batch_size: 128
+  n_train_events: 2000000            # total = steps x batch
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  amp: true                          # automatic mixed precision on GPU
+  aux_misfit_loss: true              # expected waveform misfit of WLS solution at flow samples
+  aux_misfit_weight: 0.1
+  aux_misfit_samples: 4
+  aux_misfit_events_per_batch: 8     # events per batch entering the aux misfit (full grids are big)
+  aux_misfit_stations: 8             # random stations per aux event
+  eval_every_steps: 1000
+  early_stop_patience: 20            # evals without val improvement
+  num_workers: 4
+  log_every_steps: 50
+  val_metrics_events: 32             # val events entering Kagan/coverage (full-grid WLS)
+  val_theta_samples: 128             # flow samples per val-metrics event
+  val_wls_chunk: 64                  # theta samples per WLS solve chunk
+
+inference:
+  n_theta_samples: 2000
+  n_mt_draws_per_theta: 1            # m ~ N(m_hat_j, Sigma_j) draws per theta sample
+  importance_reweight: false         # primary summary uses IS weights (both are stored)
+  wls_chunk: 64                      # theta samples per WLS solve chunk
+
+evaluate:
+  n_sbc: 1000
+  n_theta_samples: 512               # posterior samples per evaluated event
+  coverage_levels: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.68, 0.7, 0.8, 0.9]
+  snr_bins: [1.5, 3.0, 6.0, 12.0, 20.0]
+  station_bins: [4, 8, 15, 30]
+  ablations:
+    gaussian_noise: false            # (a) train with Gaussian instead of noise library
+    no_velocity_perturbation: false  # (b) train only on reference-velocity synthetics
+    direct_regression: false         # (c) direct MT regression head, no WLS layer
+
+plots:
+  dpi: 300
+  formats: [pdf, png]
+  waveform_fit_n_draws: 50

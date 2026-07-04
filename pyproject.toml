@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sbi_mt"
+version = "0.1.0"
+description = "Amortized Bayesian moment tensor inversion: neural posterior estimation over nuisance parameters + Rao-Blackwellized linear MT solve"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "torch>=2.0",
+    "zuko>=1.0",
+    "pyrocko>=2023.06",
+    "obspy>=1.4",
+    "h5py",
+    "pyyaml",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+maps = ["pygmt", "cartopy"]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["sbi_mt*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

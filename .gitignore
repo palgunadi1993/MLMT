@@ -1,0 +1,29 @@
+# planning / progress notes (kept local, not versioned)
+PLAN_SBI_MT.md
+CHECKPOINT_SBI_MT.md
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# data, stores and generated outputs
+data/
+runs/
+results/
+figures/
+tests/_cache/
+*.h5
+
+# editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
