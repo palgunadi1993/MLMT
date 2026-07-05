@@ -177,10 +177,89 @@ def create_store(
     # timings; ahfullgreen does not need them but they are cheap
     store = pgf.store.Store(sdir)
     store.make_travel_time_tables(force=force)
+    # Velocity-perturbed models can introduce low-velocity zones and hence P/S
+    # shadow zones, leaving HOLES in the cake-traced phase tables. The qseis
+    # builder's window determination probes {stored:begin} at every GF node
+    # (make_timing_params) and hard-fails on a hole (MakeTimingParamsFailed);
+    # cube extraction likewise probes {stored:anyP} everywhere. We fill the
+    # holes and overwrite each table IN PLACE, so every {stored:...} reference
+    # picks up the filled table unchanged. Only pure-P/pure-S first-arrival
+    # tables need it; 'end' is a reduction velocity ('2.5'), never a traced
+    # phase, so it can never have holes.
+    fill_ttt_holes(store, ('begin', 'anyP', 'anyS'))
     store.close()
 
     backend.build(sdir, force=force, nworkers=nworkers)
     return sdir
+
+
+def _fill_grid_nan(t: np.ndarray) -> np.ndarray:
+    """Fill NaN holes in a first-arrival table t[n_depth, n_distance].
+
+    Travel time is smooth and monotone in distance for fixed depth, so holes
+    (velocity-model shadow zones) are filled by linear interpolation along
+    distance; whole missing depth rows are then filled along depth. Edge holes
+    clamp to the nearest valid value (``np.interp`` default), which is a safe
+    over/under-estimate for the qseis time-window padding downstream.
+    """
+    t = t.astype(float).copy()
+    nz, nd = t.shape
+    di = np.arange(nd)
+    for i in range(nz):                       # interpolate along distance
+        row = t[i]
+        m = ~np.isnan(row)
+        if m.sum() >= 2:
+            t[i] = np.interp(di, di[m], row[m])
+        elif m.sum() == 1:
+            t[i] = row[m][0]
+    if np.isnan(t).any():                     # rescue fully-empty depth rows
+        zi = np.arange(nz)
+        for j in range(nd):
+            col = t[:, j]
+            m = ~np.isnan(col)
+            if m.sum() >= 2:
+                t[:, j] = np.interp(zi, zi[m], col[m])
+            elif m.sum() == 1:
+                t[:, j] = col[m][0]
+    return t
+
+
+def fill_ttt_holes(store: pgf.store.Store, phase_ids: Sequence[str]) -> None:
+    """Interpolate holes out of the named phase tables and overwrite each in
+    place, so existing ``{stored:<id>}`` references pick up the filled table.
+
+    Grid-preserving alternative to ``fomosto tttlsd`` / ``Store.fix_ttt_holes``
+    (whose eikonal solver asserts an isotropic grid, ``deltas[0]==deltas[1]``,
+    which this store's 1 km-depth x 2 km-distance grid violates). The filled
+    ``SPTree`` is rebuilt exactly as pyrocko does, from the store node grid via
+    ``grid_interpolation_coefficients``.
+    """
+    from pyrocko import spit
+
+    cfg = store.config
+    nodes = cfg.nodes(level=-1)
+    for phase_id in phase_ids:
+        spt = store.get_stored_phase(phase_id)
+        times = spt.interpolate_many(nodes).reshape(cfg.ns)  # NaN at holes
+        n_holes = int(np.isnan(times).sum())
+        if n_holes == 0:
+            continue
+        filled = _fill_grid_nan(times)
+
+        def func(x, _t=filled):
+            ibs, ics = cfg.grid_interpolation_coefficients(*x)
+            val = 0.0
+            for ib, vb in ibs:
+                for ic, vc in ics:
+                    val += _t[ib, ic] * vb * vc
+            return val
+
+        new = spit.SPTree(f=func, ftol=spt.ftol,
+                          xbounds=spt.xbounds, xtols=spt.xtols)
+        new.dump(store.phase_filename(phase_id))
+        store._phases.pop(f'{phase_id}.phase', None)  # drop cached pre-fill tree
+        logger.info('filled %d travel-time hole(s) in phase "%s"',
+                    n_holes, phase_id)
 
 
 def cube_path(cfg: dict[str, Any], store_id: str) -> str:
@@ -257,8 +336,12 @@ def extract_cube(store: pgf.store.Store, cfg: dict[str, Any],
     logger.info('extracting cube %s: (%d, %d, 10, %d)',
                 out_path, depths.size, dists.size, n_t)
 
+    # Write to a temp path and atomically rename on success: an interrupted
+    # extraction must never leave a present-but-empty cube that the script-01
+    # "cube exists, skipping" check would then trust.
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    with h5py.File(out_path, 'w') as f:
+    tmp_path = out_path + '.tmp'
+    with h5py.File(tmp_path, 'w') as f:
         dset = f.create_dataset(
             'gf', shape=(depths.size, dists.size, 10, n_t), dtype='f4',
             chunks=(1, min(32, dists.size), 10, n_t))
@@ -282,6 +365,7 @@ def extract_cube(store: pgf.store.Store, cfg: dict[str, Any],
         f.attrs['deltat'] = float(store.config.deltat)
         f.attrs['store_id'] = store.config.id
         f.attrs['band_hz'] = band       # noise/GF band bookkeeping (Tier B)
+    os.replace(tmp_path, out_path)
 
 
 class GFCube:
